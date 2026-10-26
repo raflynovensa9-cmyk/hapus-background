@@ -113,6 +113,17 @@ function App() {
           </div>
           <div>
             <p className="font-['Fredoka'] text-[21px] font-semibold leading-none tracking-tight">Hapus Background</p>
+            <p className="mt-1 text-sm text-[#54483c]">
+              oleh{' '}
+              <a
+                href="https://www.instagram.com/fly_rafly_208"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-sans text-[#54483c] no-underline hover:underline focus-visible:underline active:underline"
+              >
+                Rafly Novensa
+              </a>
+            </p>
           </div>
         </header>
 
