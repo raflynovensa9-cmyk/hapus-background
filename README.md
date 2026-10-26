@@ -5,7 +5,7 @@ Website untuk menghapus background gambar langsung di browser. Gambar diproses d
 ## Cara pakai
 
 1. Buka website melalui GitHub Pages.
-2. Pilih atau seret gambar JPG, PNG, atau WebP berukuran maksimal 30 MB.
+2. Pilih atau seret gambar JPG, PNG, atau WebP berukuran maksimal 10 MB.
 3. Tekan **Hapus background** dan tunggu prosesnya selesai.
 4. Tekan **Unduh PNG** untuk menyimpan gambar transparan.
 

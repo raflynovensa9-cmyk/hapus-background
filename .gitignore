@@ -53,4 +53,5 @@ Thumbs.db
 
 # Replit
 .cache/
+.agents/memory/
 .local/

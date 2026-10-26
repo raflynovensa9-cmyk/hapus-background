@@ -4,8 +4,51 @@ import { Download, FileImage, ImagePlus, LoaderCircle, LockKeyhole, RotateCcw, U
 
 type Phase = 'idle' | 'ready' | 'processing' | 'complete' | 'error';
 
-const MAX_FILE_SIZE = 30 * 1024 * 1024;
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+const IMGLY_PUBLIC_PATH =
+  'https://staticimgly.com/@imgly/background-removal-data/${PACKAGE_VERSION}/dist/';
+
+type ProcessingErrorDetails = { name: string; message: string };
+
+function getProcessingErrorDetails(error: unknown): ProcessingErrorDetails {
+  if (error !== null && typeof error === 'object') {
+    const candidate = error as { name?: unknown; message?: unknown };
+    return {
+      name: typeof candidate.name === 'string' && candidate.name ? candidate.name : 'Error',
+      message: typeof candidate.message === 'string' ? candidate.message : String(error),
+    };
+  }
+  if (typeof error === 'string') return { name: 'Error', message: error };
+  return { name: 'UnknownError', message: String(error) };
+}
+
+async function runWithSingleThreadedWasmWhenNeeded<T>(run: () => Promise<T>): Promise<T> {
+  if (globalThis.crossOriginIsolated || navigator.hardwareConcurrency === 1) {
+    return run();
+  }
+
+  // IMG.LY 1.7.0 reads navigator.hardwareConcurrency internally; its public config
+  // has no numThreads option. Limit it while inference runs on hosts without COOP/COEP.
+  const previousDescriptor = Object.getOwnPropertyDescriptor(navigator, 'hardwareConcurrency');
+  let overridden = false;
+  try {
+    Object.defineProperty(navigator, 'hardwareConcurrency', {
+      configurable: true,
+      value: 1,
+    });
+    overridden = true;
+    return await run();
+  } finally {
+    if (overridden) {
+      if (previousDescriptor) {
+        Object.defineProperty(navigator, 'hardwareConcurrency', previousDescriptor);
+      } else {
+        Reflect.deleteProperty(navigator, 'hardwareConcurrency');
+      }
+    }
+  }
+}
 
 function App() {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -15,6 +58,7 @@ function App() {
   const [phase, setPhase] = useState<Phase>('idle');
   const [progress, setProgress] = useState(0);
   const [statusMessage, setStatusMessage] = useState('');
+  const [processingError, setProcessingError] = useState<ProcessingErrorDetails | null>(null);
   const [isDragging, setIsDragging] = useState(false);
 
   useEffect(() => {
@@ -26,13 +70,14 @@ function App() {
 
   const chooseFile = (nextFile?: File) => {
     if (!nextFile) return;
+    setProcessingError(null);
     if (!ACCEPTED_TYPES.includes(nextFile.type)) {
       setStatusMessage('Formatnya belum cocok. Coba JPG, PNG, atau WebP ya.');
       setPhase('error');
       return;
     }
     if (nextFile.size > MAX_FILE_SIZE) {
-      setStatusMessage('Ukuran gambar terlalu besar. Maksimal 30 MB ya.');
+      setStatusMessage('Ukuran gambar terlalu besar. Maksimal 10 MB ya.');
       setPhase('error');
       return;
     }
@@ -64,19 +109,23 @@ function App() {
     if (!file || phase === 'processing') return;
     setPhase('processing');
     setProgress(0);
+    setProcessingError(null);
     setStatusMessage('Memulai pemrosesan di browser...');
     try {
-      const transparentImage = await removeBackground(file, {
-        progress: (_key, current, total) => {
-          if (total > 0) {
-            const nextProgress = Math.max(0, Math.min(100, Math.round((current / total) * 100)));
-            setProgress(nextProgress);
-            setStatusMessage(`Memproses... ${nextProgress}%`);
-          } else {
-            setStatusMessage('Memproses...');
-          }
-        },
-      });
+      const transparentImage = await runWithSingleThreadedWasmWhenNeeded(() =>
+        removeBackground(file, {
+          publicPath: IMGLY_PUBLIC_PATH,
+          progress: (_key, current, total) => {
+            if (total > 0) {
+              const nextProgress = Math.max(0, Math.min(100, Math.round((current / total) * 100)));
+              setProgress(nextProgress);
+              setStatusMessage(`Memproses... ${nextProgress}%`);
+            } else {
+              setStatusMessage('Memproses...');
+            }
+          },
+        }),
+      );
       if (!(transparentImage instanceof Blob) || transparentImage.size === 0) {
         throw new Error('Hasil gambar tidak tersedia.');
       }
@@ -86,6 +135,7 @@ function App() {
       setStatusMessage('Selesai! Background gambarmu sudah dihapus.');
     } catch (error) {
       console.error('Background removal failed:', error);
+      setProcessingError(getProcessingErrorDetails(error));
       setPhase('error');
       setStatusMessage('Belum berhasil memproses gambar. Coba lagi atau pilih gambar lain.');
     }
@@ -96,6 +146,7 @@ function App() {
     setOriginalUrl('');
     setResultUrl('');
     setProgress(0);
+    setProcessingError(null);
     setPhase('idle');
     setStatusMessage('');
     if (inputRef.current) inputRef.current.value = '';
@@ -130,7 +181,7 @@ function App() {
         <section aria-labelledby="page-title">
           <div className="mb-4">
             <h1 id="page-title" className="font-['Fredoka'] text-[29px] font-semibold leading-tight sm:text-[34px]">Yuk, pilih gambar</h1>
-            <p className="mt-1 text-sm text-[#76695c]">JPG, PNG, atau WebP · maksimal 30 MB</p>
+            <p className="mt-1 text-sm text-[#76695c]">JPG, PNG, atau WebP · maksimal 10 MB</p>
           </div>
 
           <div
@@ -180,7 +231,20 @@ function App() {
               className={`mt-4 flex min-h-12 items-center gap-3 rounded-[12px] border-2 border-[#2B2118] px-4 py-2 text-sm font-semibold ${phase === 'error' ? 'bg-[#FFD3B6]' : phase === 'complete' ? 'bg-[#CDEBD8]' : 'bg-[#FFF8EE]'}`}
             >
               {isBusy ? <LoaderCircle className="shrink-0 animate-spin" size={19} /> : phase === 'error' ? <span aria-hidden="true">!</span> : <LockKeyhole className="shrink-0" size={18} />}
-              <span className="min-w-0 flex-1">{statusMessage}</span>
+              <div className="min-w-0 flex-1">
+                <p>{statusMessage}</p>
+                {phase === 'error' && processingError && (
+                  <p
+                    data-testid="status-error-details"
+                    className="mt-1 break-all text-xs font-normal leading-relaxed text-[#54483c]"
+                  >
+                    <span className="font-semibold">err.name:</span> {processingError.name}
+                    <br />
+                    <span className="font-semibold">err.message:</span>{' '}
+                    {processingError.message || '(kosong)'}
+                  </p>
+                )}
+              </div>
               {isBusy && (
                 <span className="w-[78px] shrink-0" aria-label={`Progress ${progress}%`}>
                   <span className="block h-2 overflow-hidden rounded-full border border-[#2B2118] bg-[#FFF8EE]">
