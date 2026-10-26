@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Hapus Background"
+description = "Aplikasi web sederhana untuk menghapus latar gambar langsung di browser, melihat hasil sebelum dan sesudah, lalu mengunduhnya sebagai PNG."
+version = "1.0.0"
+id = "artifacts/hapus-bg"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 19419
+
+[services.development]
+run = "pnpm --filter @workspace/hapus-bg run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/hapus-bg", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/hapus-bg/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "19419"
+BASE_PATH = "/"

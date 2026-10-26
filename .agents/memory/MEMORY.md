@@ -1,0 +1,1 @@
+- [Client-side image privacy](client-side-image-privacy.md) — Keep background removal local so uploaded image bytes aren't sent to the server.
