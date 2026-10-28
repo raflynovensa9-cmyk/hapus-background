@@ -1,3 +1,13 @@
-<svg width="180" height="180" viewBox="0 0 180 180" fill="none" xmlns="http://www.w3.org/2000/svg">
-<rect width="180" height="180" rx="36" fill="#FF3C00"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <pattern id="c" width="16" height="16" patternUnits="userSpaceOnUse">
+      <rect width="8" height="8" fill="#CDEBD8"/>
+      <rect x="8" y="8" width="8" height="8" fill="#CDEBD8"/>
+    </pattern>
+  </defs>
+  <rect x="8" y="8" width="52" height="52" rx="10" fill="#2B2118"/>
+  <rect x="4" y="4" width="52" height="52" rx="10" fill="#FFD3B6" stroke="#2B2118" stroke-width="4"/>
+  <rect x="6" y="6" width="48" height="48" rx="8" fill="url(#c)"/>
+  <circle cx="30" cy="24" r="9" fill="#2B2118"/>
+  <path d="M13 52C14 40 21 35 30 35C39 35 46 40 47 52Z" fill="#2B2118"/>
 </svg>

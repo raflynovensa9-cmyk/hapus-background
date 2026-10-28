@@ -64,7 +64,10 @@ function App() {
     workerRef.current = worker;
     worker.onmessage = (event: MessageEvent<BackgroundRemovalResponse>) => {
       const message = event.data;
-      if (message.type === 'preload-complete') return;
+      if (message.type === 'preload-complete') {
+        document.documentElement.dataset.imglyModelReady = 'true';
+        return;
+      }
       if (message.type === 'preload-error') {
         console.warn('Background-removal model preload failed:', message.name, message.message);
         return;
