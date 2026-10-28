@@ -1,15 +1,21 @@
 import { type ChangeEvent, type DragEvent, useEffect, useRef, useState } from 'react';
-import { removeBackground } from '@imgly/background-removal';
-import { Download, FileImage, ImagePlus, LoaderCircle, LockKeyhole, RotateCcw, Upload } from 'lucide-react';
+import type {
+  BackgroundRemovalRequest,
+  BackgroundRemovalResponse,
+  BackgroundRemovalResult,
+} from './backgroundRemoval.worker';
+import { Download, ImagePlus, LoaderCircle, LockKeyhole, RotateCcw, Upload } from 'lucide-react';
 
 type Phase = 'idle' | 'ready' | 'processing' | 'complete' | 'error';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
-const IMGLY_PUBLIC_PATH =
-  'https://staticimgly.com/@imgly/background-removal-data/${PACKAGE_VERSION}/dist/';
 
 type ProcessingErrorDetails = { name: string; message: string };
+type PendingJob = {
+  resolve: (result: BackgroundRemovalResult) => void;
+  reject: (error: Error) => void;
+};
 
 function getProcessingErrorDetails(error: unknown): ProcessingErrorDetails {
   if (error !== null && typeof error === 'object') {
@@ -23,31 +29,10 @@ function getProcessingErrorDetails(error: unknown): ProcessingErrorDetails {
   return { name: 'UnknownError', message: String(error) };
 }
 
-async function runWithSingleThreadedWasmWhenNeeded<T>(run: () => Promise<T>): Promise<T> {
-  if (globalThis.crossOriginIsolated || navigator.hardwareConcurrency === 1) {
-    return run();
-  }
-
-  // IMG.LY 1.7.0 reads navigator.hardwareConcurrency internally; its public config
-  // has no numThreads option. Limit it while inference runs on hosts without COOP/COEP.
-  const previousDescriptor = Object.getOwnPropertyDescriptor(navigator, 'hardwareConcurrency');
-  let overridden = false;
-  try {
-    Object.defineProperty(navigator, 'hardwareConcurrency', {
-      configurable: true,
-      value: 1,
-    });
-    overridden = true;
-    return await run();
-  } finally {
-    if (overridden) {
-      if (previousDescriptor) {
-        Object.defineProperty(navigator, 'hardwareConcurrency', previousDescriptor);
-      } else {
-        Reflect.deleteProperty(navigator, 'hardwareConcurrency');
-      }
-    }
-  }
+function waitForBrowserPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => window.setTimeout(resolve, 50));
+  });
 }
 
 function App() {
@@ -59,14 +44,102 @@ function App() {
   const [progress, setProgress] = useState(0);
   const [statusMessage, setStatusMessage] = useState('');
   const [processingError, setProcessingError] = useState<ProcessingErrorDetails | null>(null);
+  const [processingStage, setProcessingStage] = useState<'resize' | 'download' | 'process'>('resize');
   const [isDragging, setIsDragging] = useState(false);
+  const workerRef = useRef<Worker | null>(null);
+  const activeRequestIdRef = useRef<string | null>(null);
+  const pendingJobsRef = useRef(new Map<string, PendingJob>());
 
   useEffect(() => {
-    return () => {
-      if (originalUrl) URL.revokeObjectURL(originalUrl);
-      if (resultUrl) URL.revokeObjectURL(resultUrl);
+    let worker: Worker;
+    try {
+      worker = new Worker(new URL('./backgroundRemoval.worker.ts', import.meta.url), {
+        type: 'module',
+      });
+    } catch (error) {
+      console.error('Background-removal worker could not start:', error);
+      return;
+    }
+
+    workerRef.current = worker;
+    worker.onmessage = (event: MessageEvent<BackgroundRemovalResponse>) => {
+      const message = event.data;
+      if (message.type === 'preload-complete') return;
+      if (message.type === 'preload-error') {
+        console.warn('Background-removal model preload failed:', message.name, message.message);
+        return;
+      }
+
+      if (message.requestId === activeRequestIdRef.current && message.type === 'progress') {
+        setProcessingStage(message.stage);
+        setProgress(message.percent);
+        if (message.stage === 'resize') {
+          setStatusMessage('Memperkecil gambar...');
+        } else if (message.stage === 'download') {
+          setStatusMessage(`Mengunduh model... ${message.percent}%`);
+        } else {
+          setStatusMessage(`Memproses... ${message.percent}%`);
+        }
+        return;
+      }
+
+      const pending = pendingJobsRef.current.get(message.requestId);
+      if (!pending) return;
+      pendingJobsRef.current.delete(message.requestId);
+      activeRequestIdRef.current = null;
+
+      if (message.type === 'result') {
+        pending.resolve(message);
+      } else if (message.type === 'error') {
+        const error = new Error(message.message);
+        error.name = message.name;
+        pending.reject(error);
+      }
     };
-  }, [originalUrl, resultUrl]);
+    worker.onerror = (event) => {
+      const error = new Error(event.message || 'Web Worker gagal dijalankan.');
+      for (const pending of pendingJobsRef.current.values()) pending.reject(error);
+      pendingJobsRef.current.clear();
+      activeRequestIdRef.current = null;
+    };
+
+    const connection = (navigator as Navigator & { connection?: { saveData?: boolean } }).connection;
+    let idleHandle: number | undefined;
+    let fallbackHandle: number | undefined;
+    const idleWindow = window as unknown as {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    const startPreload = () => worker.postMessage({ type: 'preload' } satisfies BackgroundRemovalRequest);
+    if (!connection?.saveData) {
+      if (idleWindow.requestIdleCallback) {
+        idleHandle = idleWindow.requestIdleCallback(startPreload, { timeout: 5000 });
+      } else {
+        fallbackHandle = window.setTimeout(startPreload, 1200);
+      }
+    }
+
+    return () => {
+      if (idleHandle !== undefined) idleWindow.cancelIdleCallback?.(idleHandle);
+      if (fallbackHandle !== undefined) window.clearTimeout(fallbackHandle);
+      for (const pending of pendingJobsRef.current.values()) {
+        pending.reject(new Error('Pemrosesan dihentikan karena halaman ditutup.'));
+      }
+      pendingJobsRef.current.clear();
+      worker.terminate();
+      if (workerRef.current === worker) workerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!originalUrl) return;
+    return () => URL.revokeObjectURL(originalUrl);
+  }, [originalUrl]);
+
+  useEffect(() => {
+    if (!resultUrl) return;
+    return () => URL.revokeObjectURL(resultUrl);
+  }, [resultUrl]);
 
   const chooseFile = (nextFile?: File) => {
     if (!nextFile) return;
@@ -101,6 +174,7 @@ function App() {
 
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
+    if (phase === 'processing') return;
     setIsDragging(false);
     chooseFile(event.dataTransfer.files?.[0]);
   };
@@ -108,24 +182,23 @@ function App() {
   const processImage = async () => {
     if (!file || phase === 'processing') return;
     setPhase('processing');
+    setProcessingStage('resize');
     setProgress(0);
     setProcessingError(null);
-    setStatusMessage('Memulai pemrosesan di browser...');
+    setStatusMessage('Memperkecil gambar...');
     try {
-      const transparentImage = await runWithSingleThreadedWasmWhenNeeded(() =>
-        removeBackground(file, {
-          publicPath: IMGLY_PUBLIC_PATH,
-          progress: (_key, current, total) => {
-            if (total > 0) {
-              const nextProgress = Math.max(0, Math.min(100, Math.round((current / total) * 100)));
-              setProgress(nextProgress);
-              setStatusMessage(`Memproses... ${nextProgress}%`);
-            } else {
-              setStatusMessage('Memproses...');
-            }
-          },
-        }),
-      );
+      await waitForBrowserPaint();
+      const worker = workerRef.current;
+      if (!worker) throw new Error('Web Worker tidak tersedia di browser ini.');
+
+      const requestId = crypto.randomUUID();
+      activeRequestIdRef.current = requestId;
+      const result = await new Promise<BackgroundRemovalResult>((resolve, reject) => {
+        pendingJobsRef.current.set(requestId, { resolve, reject });
+        const request: BackgroundRemovalRequest = { type: 'process', requestId, file };
+        worker.postMessage(request);
+      });
+      const transparentImage = result.blob;
       if (!(transparentImage instanceof Blob) || transparentImage.size === 0) {
         throw new Error('Hasil gambar tidak tersedia.');
       }
@@ -159,9 +232,13 @@ function App() {
     <main className="paper-noise min-h-[100dvh] px-4 pb-10 pt-5 sm:px-7 sm:pt-8">
       <div className="mx-auto w-full max-w-[940px]">
         <header className="mb-7 flex items-center gap-3 sm:mb-9">
-          <div className="flex h-11 w-11 items-center justify-center rounded-[12px] border-2 border-[#2B2118] bg-[#FFD3B6] shadow-[3px_3px_0_#2B2118]" aria-hidden="true">
-            <FileImage size={22} strokeWidth={2.2} />
-          </div>
+          <img
+            src={`${import.meta.env.BASE_URL}favicon.svg`}
+            alt="Logo Hapus Background"
+            className="h-11 w-11 shrink-0 object-contain"
+            width="44"
+            height="44"
+          />
           <div>
             <p className="font-['Fredoka'] text-[21px] font-semibold leading-none tracking-tight">Hapus Background</p>
             <p className="mt-1 text-sm text-[#54483c]">
@@ -186,7 +263,7 @@ function App() {
 
           <div
             data-testid="dropzone-image"
-            onDragOver={(event) => { event.preventDefault(); setIsDragging(true); }}
+            onDragOver={(event) => { event.preventDefault(); if (!isBusy) setIsDragging(true); }}
             onDragLeave={() => setIsDragging(false)}
             onDrop={handleDrop}
             className={`rounded-[14px] border-2 border-dashed border-[#2B2118] bg-[#FFD3B6] px-5 py-7 transition-[transform,background-color] sm:px-8 sm:py-9 ${isDragging ? 'scale-[1.01] bg-[#fbc09a]' : ''}`}
@@ -219,6 +296,7 @@ function App() {
               type="file"
               accept="image/jpeg,image/png,image/webp"
               aria-label="Pilih gambar untuk menghapus background"
+              disabled={isBusy}
               onChange={handleInput}
             />
           </div>
@@ -228,6 +306,7 @@ function App() {
               role={phase === 'error' ? 'alert' : 'status'}
               aria-live="polite"
               data-testid="status-processing"
+              data-processing-stage={isBusy ? processingStage : undefined}
               className={`mt-4 flex min-h-12 items-center gap-3 rounded-[12px] border-2 border-[#2B2118] px-4 py-2 text-sm font-semibold ${phase === 'error' ? 'bg-[#FFD3B6]' : phase === 'complete' ? 'bg-[#CDEBD8]' : 'bg-[#FFF8EE]'}`}
             >
               {isBusy ? <LoaderCircle className="shrink-0 animate-spin" size={19} /> : phase === 'error' ? <span aria-hidden="true">!</span> : <LockKeyhole className="shrink-0" size={18} />}
@@ -244,13 +323,19 @@ function App() {
                     {processingError.message || '(kosong)'}
                   </p>
                 )}
+                {isBusy && (
+                  <p className="mt-1 text-xs font-normal leading-relaxed text-[#54483c]">
+                    Sedang memproses, halaman mungkin terasa berat. Jangan tutup atau pindah tab.
+                  </p>
+                )}
               </div>
               {isBusy && (
-                <span className="w-[78px] shrink-0" aria-label={`Progress ${progress}%`}>
-                  <span className="block h-2 overflow-hidden rounded-full border border-[#2B2118] bg-[#FFF8EE]">
+                <div className="w-[78px] shrink-0 text-right text-xs font-bold" aria-label={`Progress ${progress}%`}>
+                  <span className="block">{progress}%</span>
+                  <span className="mt-1 block h-2 overflow-hidden rounded-full border border-[#2B2118] bg-[#FFF8EE]">
                     <span className="block h-full bg-[#2B2118] transition-[width] duration-300" style={{ width: `${progress}%` }} />
                   </span>
-                </span>
+                </div>
               )}
             </div>
           )}
@@ -285,6 +370,7 @@ function App() {
                   type="button"
                   data-testid="button-select-another"
                   onClick={selectAnother}
+                  disabled={isBusy}
                   className="pressable inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-[12px] border-2 border-[#2B2118] bg-[#FFF8EE] px-5 font-bold sm:w-auto"
                 >
                   <RotateCcw size={17} />
